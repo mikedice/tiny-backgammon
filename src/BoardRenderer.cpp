@@ -79,6 +79,22 @@ void drawCaret(Adafruit_SSD1306& d, int point, bool hollow) {
     }
 }
 
+// The bar and off-tray aren't triangle slots, so they get their own marker
+// shapes: a small square in the middle gap for the bar, and a small square
+// near the right edge (row depends on whose home board is bearing off) for
+// bearing off.
+void drawBarCaret(Adafruit_SSD1306& d, bool hollow) {
+    int xMid = BAR_X + BAR_W / 2;
+    if (hollow) d.drawRect(xMid - 3, 34, 6, 5, SSD1306_WHITE);
+    else d.fillRect(xMid - 3, 34, 6, 5, SSD1306_WHITE);
+}
+
+void drawOffCaret(Adafruit_SSD1306& d, Player p, bool hollow) {
+    int y = (p == Player::P0) ? (BOARD_BOTTOM - 5) : BOARD_TOP;
+    if (hollow) d.drawRect(122, y, 5, 5, SSD1306_WHITE);
+    else d.fillRect(122, y, 5, 5, SSD1306_WHITE);
+}
+
 } // namespace
 
 void BoardRenderer::draw(Adafruit_SSD1306& display, const Board& board, Player toMove,
@@ -94,6 +110,7 @@ void BoardRenderer::draw(Adafruit_SSD1306& display, const Board& board, Player t
         case UIMode::WaitingToRoll: display.print("ROLL"); break;
         case UIMode::SelectingSource: display.print("PICK"); break;
         case UIMode::SelectingDestination: display.print("DEST"); break;
+        case UIMode::ComputerTurn: display.print("CPU"); break;
         case UIMode::GameOver: display.print("WINS!"); break;
     }
     if (!diceRemaining.empty()) {
@@ -124,12 +141,14 @@ void BoardRenderer::draw(Adafruit_SSD1306& display, const Board& board, Player t
     drawCheckerStack(display, barXMid, BOARD_TOP, board.bar[static_cast<int>(Player::P0)], true, true);
     drawCheckerStack(display, barXMid, BOARD_BOTTOM, board.bar[static_cast<int>(Player::P1)], false, false);
 
-    if (ui.mode == UIMode::SelectingDestination && ui.selectedSource >= 1 && ui.selectedSource <= 24) {
-        drawCaret(display, ui.selectedSource, true);
+    if (ui.mode == UIMode::SelectingDestination) {
+        if (ui.selectedSource >= 1 && ui.selectedSource <= 24) drawCaret(display, ui.selectedSource, true);
+        else if (ui.selectedSource == BAR) drawBarCaret(display, true);
     }
-    if ((ui.mode == UIMode::SelectingSource || ui.mode == UIMode::SelectingDestination) &&
-        ui.cursorPoint >= 1 && ui.cursorPoint <= 24) {
-        drawCaret(display, ui.cursorPoint, false);
+    if (ui.mode == UIMode::SelectingSource || ui.mode == UIMode::SelectingDestination) {
+        if (ui.cursorPoint >= 1 && ui.cursorPoint <= 24) drawCaret(display, ui.cursorPoint, false);
+        else if (ui.cursorPoint == BAR) drawBarCaret(display, false);
+        else if (ui.cursorPoint == OFF) drawOffCaret(display, toMove, false);
     }
 
     display.display();

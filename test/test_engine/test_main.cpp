@@ -2,6 +2,7 @@
 #include "Board.h"
 #include "MoveGen.h"
 #include "Game.h"
+#include "ComputerPlayer.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -84,6 +85,82 @@ void test_bar_entry_required_and_blocked(void) {
     b.points[21] = -2;
     auto moves2 = MoveGen::legalMoves(b, Player::P0, dice);
     for (auto& m : moves2) TEST_ASSERT_FALSE(m.die == 3);
+}
+
+void test_two_on_bar_enter_sequentially(void) {
+    Board b;
+    b.bar[static_cast<int>(Player::P0)] = 2;
+    std::vector<int> dice = {3, 5};
+
+    TEST_ASSERT_EQUAL(2, MoveGen::maxPlyLength(b, Player::P0, dice));
+    auto moves = MoveGen::legalMoves(b, Player::P0, dice);
+    TEST_ASSERT_EQUAL(2, moves.size());
+    for (auto& m : moves) TEST_ASSERT_EQUAL(BAR, m.from);
+
+    // Enter one with die 3; the second bar checker must still enter with the
+    // remaining die (5), not have some other checker move instead.
+    b.applyMove(Player::P0, Move{BAR, 22, 3});
+    TEST_ASSERT_EQUAL(1, b.bar[static_cast<int>(Player::P0)]);
+
+    std::vector<int> remaining = {5};
+    auto moves2 = MoveGen::legalMoves(b, Player::P0, remaining);
+    TEST_ASSERT_EQUAL(1, moves2.size());
+    TEST_ASSERT_EQUAL(BAR, moves2[0].from);
+    TEST_ASSERT_EQUAL(20, moves2[0].to);
+}
+
+void test_two_on_bar_partial_entry_when_one_blocked(void) {
+    Board b;
+    b.bar[static_cast<int>(Player::P0)] = 2;
+    b.points[21] = -2; // point 22 (die-3 entry) blocked
+    std::vector<int> dice = {3, 5};
+
+    TEST_ASSERT_EQUAL(1, MoveGen::maxPlyLength(b, Player::P0, dice));
+    auto moves = MoveGen::legalMoves(b, Player::P0, dice);
+    TEST_ASSERT_EQUAL(1, moves.size());
+    TEST_ASSERT_EQUAL(BAR, moves[0].from);
+    TEST_ASSERT_EQUAL(5, moves[0].die);
+    TEST_ASSERT_EQUAL(20, moves[0].to);
+
+    // The stranded second checker stays on the bar; nothing else may move.
+    b.applyMove(Player::P0, moves[0]);
+    TEST_ASSERT_EQUAL(1, b.bar[static_cast<int>(Player::P0)]);
+}
+
+void test_two_on_bar_with_doubles(void) {
+    Board b;
+    b.bar[static_cast<int>(Player::P0)] = 2;
+    std::vector<int> dice = {4, 4, 4, 4};
+
+    TEST_ASSERT_EQUAL(4, MoveGen::maxPlyLength(b, Player::P0, dice));
+
+    auto moves = MoveGen::legalMoves(b, Player::P0, dice);
+    TEST_ASSERT_EQUAL(1, moves.size());
+    TEST_ASSERT_EQUAL(BAR, moves[0].from);
+    TEST_ASSERT_EQUAL(21, moves[0].to); // 25 - 4
+
+    b.applyMove(Player::P0, moves[0]);
+    TEST_ASSERT_EQUAL(1, b.bar[static_cast<int>(Player::P0)]);
+
+    std::vector<int> remaining = {4, 4, 4};
+    auto moves2 = MoveGen::legalMoves(b, Player::P0, remaining);
+    TEST_ASSERT_EQUAL(1, moves2.size());
+    TEST_ASSERT_EQUAL(BAR, moves2[0].from);
+    TEST_ASSERT_EQUAL(21, moves2[0].to);
+
+    b.applyMove(Player::P0, moves2[0]);
+    TEST_ASSERT_EQUAL(0, b.bar[static_cast<int>(Player::P0)]);
+    TEST_ASSERT_EQUAL(2, b.checkersOf(Player::P0, 21));
+
+    // Bar now empty — remaining dice move normally from point 21.
+    std::vector<int> lastTwo = {4, 4};
+    auto moves3 = MoveGen::legalMoves(b, Player::P0, lastTwo);
+    bool foundNormalMove = false;
+    for (auto& m : moves3) {
+        if (m.from == 21) foundNormalMove = true;
+        TEST_ASSERT_FALSE(m.from == BAR);
+    }
+    TEST_ASSERT_TRUE(foundNormalMove);
 }
 
 void test_bear_off_exact(void) {
@@ -179,16 +256,45 @@ void test_game_turn_flow(void) {
     TEST_ASSERT_EQUAL(static_cast<int>(GamePhase::WaitingToRoll), static_cast<int>(game.phase()));
 }
 
+void test_computer_prefers_hit(void) {
+    Board b;
+    b.points[4] = 1; // point 5: P0 blot (opponent, from P1's perspective)
+
+    Move hitMove{10, 5, 5};  // lands on point 5 -> hits the blot
+    Move safeMove{10, 8, 2}; // lands on empty point 8 -> no hit
+    std::vector<Move> options = {safeMove, hitMove};
+
+    Move chosen = ComputerPlayer::chooseMove(b, Player::P1, options);
+    TEST_ASSERT_EQUAL(5, chosen.to);
+}
+
+void test_computer_prefers_making_point_over_blot(void) {
+    Board b;
+    b.points[7] = -1; // point 8: P1 already has a single checker there
+
+    Move makePointMove{10, 8, 2}; // joins the existing checker -> makes a point
+    Move blotMove{10, 14, 4};     // lands on an empty point -> leaves a lone blot
+    std::vector<Move> options = {blotMove, makePointMove};
+
+    Move chosen = ComputerPlayer::chooseMove(b, Player::P1, options);
+    TEST_ASSERT_EQUAL(8, chosen.to);
+}
+
 int main(int argc, char** argv) {
     UNITY_BEGIN();
     RUN_TEST(test_initial_setup);
     RUN_TEST(test_basic_move_and_blocking);
     RUN_TEST(test_hit_blot);
     RUN_TEST(test_bar_entry_required_and_blocked);
+    RUN_TEST(test_two_on_bar_enter_sequentially);
+    RUN_TEST(test_two_on_bar_partial_entry_when_one_blocked);
+    RUN_TEST(test_two_on_bar_with_doubles);
     RUN_TEST(test_bear_off_exact);
     RUN_TEST(test_bear_off_overshoot_rules);
     RUN_TEST(test_doubles_give_four_dice);
     RUN_TEST(test_forced_larger_die_when_only_one_playable);
     RUN_TEST(test_game_turn_flow);
+    RUN_TEST(test_computer_prefers_hit);
+    RUN_TEST(test_computer_prefers_making_point_over_blot);
     return UNITY_END();
 }

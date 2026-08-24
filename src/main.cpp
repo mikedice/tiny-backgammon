@@ -9,6 +9,7 @@
 #include "Game.h"
 #include "BoardRenderer.h"
 #include "InputController.h"
+#include "ComputerPlayer.h"
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
@@ -22,6 +23,11 @@ int hwRollDie() {
 
 Game game(hwRollDie);
 UIState ui;
+
+constexpr Player HUMAN = Player::P0;
+constexpr Player COMPUTER = Player::P1;
+constexpr unsigned long AI_ROLL_DELAY_MS = 700;
+constexpr unsigned long AI_MOVE_DELAY_MS = 900;
 
 int wrapIndex(int idx, int size) {
     if (size <= 0) return 0;
@@ -58,6 +64,31 @@ void enterSelectingSource(const std::vector<Move>& legal) {
     ui.cursorPoint = froms.empty() ? -1 : froms[0];
 }
 
+// Plays out the computer's entire turn (roll + every move) synchronously,
+// with a pause before rolling and between each move so the human can watch
+// it happen. No input is needed during this, so blocking delay() is fine.
+void playComputerTurn() {
+    ui.mode = UIMode::ComputerTurn;
+    ui.selectedSource = -1;
+    ui.cursorPoint = -1;
+
+    delay(AI_ROLL_DELAY_MS);
+    game.roll();
+    BoardRenderer::draw(display, game.board(), game.toMove(), game.diceRemaining(), ui);
+
+    while (game.phase() == GamePhase::MovingCheckers && game.toMove() == COMPUTER) {
+        delay(AI_MOVE_DELAY_MS);
+        auto legal = game.currentLegalMoves();
+        if (legal.empty()) break; // Game guarantees this won't happen in this phase
+        Move chosen = ComputerPlayer::chooseMove(game.board(), COMPUTER, legal);
+        game.playMove(chosen);
+        BoardRenderer::draw(display, game.board(), game.toMove(), game.diceRemaining(), ui);
+    }
+
+    ui.mode = (game.phase() == GamePhase::GameOver) ? UIMode::GameOver : UIMode::WaitingToRoll;
+    BoardRenderer::draw(display, game.board(), game.toMove(), game.diceRemaining(), ui);
+}
+
 void setup() {
     Serial.begin(115200);
 
@@ -72,6 +103,11 @@ void setup() {
 }
 
 void loop() {
+    if (game.toMove() == COMPUTER && game.phase() != GamePhase::GameOver) {
+        playComputerTurn();
+        return;
+    }
+
     input.poll();
     int rot = input.consumeRotation();
     bool click = input.consumeClick();

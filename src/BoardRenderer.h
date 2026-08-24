@@ -4,7 +4,7 @@
 #include "Board.h"
 #include "Types.h"
 
-enum class UIMode { WaitingToRoll, SelectingSource, SelectingDestination, GameOver };
+enum class UIMode { WaitingToRoll, SelectingSource, SelectingDestination, ComputerTurn, GameOver };
 
 struct UIState {
     UIMode mode = UIMode::WaitingToRoll;
