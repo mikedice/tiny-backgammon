@@ -1,7 +1,7 @@
 #include <Arduino.h>
-#include <Wire.h>
+#include <SPI.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <Adafruit_ILI9341.h>
 #include <esp_random.h>
 #include <algorithm>
 
@@ -11,7 +11,13 @@
 #include "InputController.h"
 #include "ComputerPlayer.h"
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+Adafruit_ILI9341 display(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
+
+// Off-screen framebuffer: BoardRenderer draws into RAM here, then the whole
+// frame is pushed to the panel in one SPI transfer. Drawing shapes directly
+// to the panel (no buffering) is visibly slow enough to watch happen —
+// flicker and a "jumpy" cursor — this makes each redraw appear atomic.
+GFXcanvas16 canvas(SCREEN_WIDTH, SCREEN_HEIGHT);
 
 // Constructor pins swapped (DT, CLK) vs. physical CLK/DT wiring, so that
 // turning the knob clockwise increases the encoder position.
@@ -64,6 +70,13 @@ void enterSelectingSource(const std::vector<Move>& legal) {
     ui.cursorPoint = froms.empty() ? -1 : froms[0];
 }
 
+// Draws the frame into the off-screen canvas, then pushes it to the panel
+// as one SPI transfer.
+void renderFrame() {
+    BoardRenderer::draw(canvas, game.board(), game.toMove(), game.diceRemaining(), ui);
+    display.drawRGBBitmap(0, 0, canvas.getBuffer(), SCREEN_WIDTH, SCREEN_HEIGHT);
+}
+
 // Plays out the computer's entire turn (roll + every move) synchronously,
 // with a pause before rolling and between each move so the human can watch
 // it happen. No input is needed during this, so blocking delay() is fine.
@@ -74,7 +87,7 @@ void playComputerTurn() {
 
     delay(AI_ROLL_DELAY_MS);
     game.roll();
-    BoardRenderer::draw(display, game.board(), game.toMove(), game.diceRemaining(), ui);
+    renderFrame();
 
     while (game.phase() == GamePhase::MovingCheckers && game.toMove() == COMPUTER) {
         delay(AI_MOVE_DELAY_MS);
@@ -82,24 +95,28 @@ void playComputerTurn() {
         if (legal.empty()) break; // Game guarantees this won't happen in this phase
         Move chosen = ComputerPlayer::chooseMove(game.board(), COMPUTER, legal);
         game.playMove(chosen);
-        BoardRenderer::draw(display, game.board(), game.toMove(), game.diceRemaining(), ui);
+        renderFrame();
     }
 
     ui.mode = (game.phase() == GamePhase::GameOver) ? UIMode::GameOver : UIMode::WaitingToRoll;
-    BoardRenderer::draw(display, game.board(), game.toMove(), game.diceRemaining(), ui);
+    renderFrame();
 }
 
 void setup() {
     Serial.begin(115200);
 
-    if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_I2C_ADDR)) {
-        Serial.println("SSD1306 allocation failed");
+    display.begin();
+    display.setRotation(1); // landscape: 320 wide x 240 tall
+
+    if (!canvas.getBuffer()) {
+        Serial.println("Canvas allocation failed - out of RAM");
         while (true) delay(1000);
     }
+    Serial.printf("Free heap after canvas alloc: %u bytes\n", ESP.getFreeHeap());
 
     input.begin();
 
-    BoardRenderer::draw(display, game.board(), game.toMove(), game.diceRemaining(), ui);
+    renderFrame();
 }
 
 void loop() {
@@ -194,6 +211,6 @@ void loop() {
     }
 
     if (needsRedraw) {
-        BoardRenderer::draw(display, game.board(), game.toMove(), game.diceRemaining(), ui);
+        renderFrame();
     }
 }

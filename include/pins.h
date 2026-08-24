@@ -1,14 +1,17 @@
 #pragma once
 
-// I2C (OLED) uses the board's default SDA/SCL (A4/A5) — no need to set pins
-// explicitly, Wire.begin() picks them up from the Nano ESP32 variant.
-
 // Rotary encoder
 static constexpr uint8_t PIN_ENCODER_CLK = D2;
 static constexpr uint8_t PIN_ENCODER_DT  = D3;
 static constexpr uint8_t PIN_ENCODER_SW  = D4;
 
-// SSD1306 display
-static constexpr uint8_t SCREEN_WIDTH  = 128;
-static constexpr uint8_t SCREEN_HEIGHT = 64;
-static constexpr uint8_t SCREEN_I2C_ADDR = 0x3C; // most common; try 0x3D if blank
+// ILI9341 TFT (SPI). MOSI/MISO/SCK use the board's default hardware SPI
+// pins (D11/D12/D13) — Adafruit_ILI9341's constructor uses the default SPI
+// bus implicitly, so only the control pins need to be named here.
+static constexpr uint8_t PIN_TFT_CS  = D10;
+static constexpr uint8_t PIN_TFT_DC  = D9;
+static constexpr uint8_t PIN_TFT_RST = D8;
+
+// Panel is 240x320 native (portrait); we run it rotated to landscape.
+static constexpr int SCREEN_WIDTH  = 320;
+static constexpr int SCREEN_HEIGHT = 240;

@@ -1,5 +1,5 @@
 #pragma once
-#include <Adafruit_SSD1306.h>
+#include <Adafruit_GFX.h>
 #include <vector>
 #include "Board.h"
 #include "Types.h"
@@ -16,6 +16,6 @@ struct UIState {
 
 class BoardRenderer {
 public:
-    static void draw(Adafruit_SSD1306& display, const Board& board, Player toMove,
+    static void draw(Adafruit_GFX& display, const Board& board, Player toMove,
                       const std::vector<int>& diceRemaining, const UIState& ui);
 };

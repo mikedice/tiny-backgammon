@@ -1,23 +1,43 @@
 #include "BoardRenderer.h"
 
-// Layout (128x64):
-//   y 0..7    status line
-//   y 9..32   top-row triangles (13-18 | bar | 19-24), base at 9, apex at 33
-//   y 33..39  middle gap — cursor carets live here
-//   y 39..63  bottom-row triangles (12-7 | bar | 6-1), apex at 39, base at 63
-//   x 0..59   left half (6 slots x 10px)
-//   x 60..67  bar column
-//   x 68..127 right half (6 slots x 10px)
+// Layout (320x240 landscape):
+//   y 0..21     status bar
+//   y 22..109   top-row triangles (13-18 | bar | 19-24), base at 22, apex at 110
+//   y 110..151  middle gap — cursor carets live here
+//   y 151..239  bottom-row triangles (12-7 | bar | 6-1), apex at 151, base at 239
+//   x 0..149    left half (6 slots x 25px)
+//   x 150..169  bar column
+//   x 170..319  right half (6 slots x 25px)
 namespace {
 
-constexpr int BOARD_TOP = 9;
-constexpr int BOARD_BOTTOM = 63;
-constexpr int TRIANGLE_H = 24;
-constexpr int SLOT_W = 10;
-constexpr int BAR_X = 60;
-constexpr int BAR_W = 8;
+constexpr int STATUS_H = 22;
+constexpr int BOARD_TOP = 22;
+constexpr int BOARD_BOTTOM = 239;
+constexpr int TRIANGLE_H = 88;
+constexpr int SLOT_W = 25;
+constexpr int BAR_X = 150;
+constexpr int BAR_W = 20;
 constexpr int RIGHT_HALF_X = BAR_X + BAR_W;
-constexpr int CHECKER_R = 3;
+constexpr int CHECKER_R = 8;
+
+constexpr uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
+    return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+}
+
+const uint16_t COLOR_BG = rgb565(101, 67, 33);        // walnut background
+const uint16_t COLOR_POINT_A = rgb565(214, 184, 140); // tan
+const uint16_t COLOR_POINT_B = rgb565(139, 94, 60);   // medium brown
+const uint16_t COLOR_BAR = rgb565(58, 36, 24);        // near-black walnut
+const uint16_t COLOR_OUTLINE = rgb565(35, 20, 12);
+const uint16_t COLOR_STATUS_BG = rgb565(24, 24, 24);
+const uint16_t COLOR_TEXT = rgb565(255, 255, 255);
+
+const uint16_t COLOR_P0_FILL = rgb565(250, 248, 240); // human: ivory
+const uint16_t COLOR_P0_EDGE = rgb565(40, 40, 40);
+const uint16_t COLOR_P1_FILL = rgb565(160, 24, 24);   // computer: deep red
+const uint16_t COLOR_P1_EDGE = rgb565(255, 230, 190);
+
+const uint16_t COLOR_CURSOR = rgb565(255, 200, 40); // gold
 
 struct PointGeom {
     int x;    // left edge of the slot
@@ -31,80 +51,87 @@ PointGeom pointGeom(int point) {
     return {RIGHT_HALF_X + (6 - point) * SLOT_W, false}; // 1..6
 }
 
-void drawBoard(Adafruit_SSD1306& d) {
+void drawBoard(Adafruit_GFX& d) {
+    d.fillRect(0, STATUS_H, d.width(), d.height() - STATUS_H, COLOR_BG);
+
     for (int point = 1; point <= 24; ++point) {
         PointGeom g = pointGeom(point);
         int xMid = g.x + SLOT_W / 2;
+        uint16_t color = (point % 2 == 0) ? COLOR_POINT_A : COLOR_POINT_B;
         if (g.top) {
-            d.drawTriangle(g.x, BOARD_TOP, g.x + SLOT_W, BOARD_TOP, xMid, BOARD_TOP + TRIANGLE_H, SSD1306_WHITE);
+            d.fillTriangle(g.x, BOARD_TOP, g.x + SLOT_W, BOARD_TOP, xMid, BOARD_TOP + TRIANGLE_H, color);
+            d.drawTriangle(g.x, BOARD_TOP, g.x + SLOT_W, BOARD_TOP, xMid, BOARD_TOP + TRIANGLE_H, COLOR_OUTLINE);
         } else {
-            d.drawTriangle(g.x, BOARD_BOTTOM, g.x + SLOT_W, BOARD_BOTTOM, xMid, BOARD_BOTTOM - TRIANGLE_H, SSD1306_WHITE);
+            d.fillTriangle(g.x, BOARD_BOTTOM, g.x + SLOT_W, BOARD_BOTTOM, xMid, BOARD_BOTTOM - TRIANGLE_H, color);
+            d.drawTriangle(g.x, BOARD_BOTTOM, g.x + SLOT_W, BOARD_BOTTOM, xMid, BOARD_BOTTOM - TRIANGLE_H, COLOR_OUTLINE);
         }
     }
-    d.drawRect(BAR_X, BOARD_TOP, BAR_W, BOARD_BOTTOM - BOARD_TOP, SSD1306_WHITE);
+
+    d.fillRect(BAR_X, BOARD_TOP, BAR_W, BOARD_BOTTOM - BOARD_TOP, COLOR_BAR);
+    d.drawRect(BAR_X, BOARD_TOP, BAR_W, BOARD_BOTTOM - BOARD_TOP, COLOR_OUTLINE);
+    d.drawRect(0, BOARD_TOP, d.width(), BOARD_BOTTOM - BOARD_TOP, COLOR_OUTLINE);
 }
 
-// Stacks up to 3 individual checkers from the triangle's base inward; beyond
-// that, shows 2 checkers plus a numeral for the true count.
-void drawCheckerStack(Adafruit_SSD1306& d, int xMid, int baseY, int count, bool growDown, bool filled) {
+// Stacks individual checkers from the triangle's base inward; a full 5-high
+// stack fits without crowding. Beyond that, shows 4 checkers plus a numeral
+// for the true count.
+void drawCheckerStack(Adafruit_GFX& d, int xMid, int baseY, int count, bool growDown, Player p) {
     if (count <= 0) return;
-    int shown = count <= 3 ? count : 2;
+    uint16_t fill = (p == Player::P0) ? COLOR_P0_FILL : COLOR_P1_FILL;
+    uint16_t edge = (p == Player::P0) ? COLOR_P0_EDGE : COLOR_P1_EDGE;
+
+    int shown = count <= 5 ? count : 4;
     int step = CHECKER_R * 2 + 1;
 
     for (int i = 0; i < shown; ++i) {
         int cy = growDown ? (baseY + CHECKER_R + i * step) : (baseY - CHECKER_R - i * step);
-        if (filled) d.fillCircle(xMid, cy, CHECKER_R, SSD1306_WHITE);
-        else d.drawCircle(xMid, cy, CHECKER_R, SSD1306_WHITE);
+        d.fillCircle(xMid, cy, CHECKER_R, fill);
+        d.drawCircle(xMid, cy, CHECKER_R, edge);
     }
 
-    if (count > 3) {
+    if (count > 5) {
         int cy = growDown ? (baseY + CHECKER_R + shown * step) : (baseY - CHECKER_R - shown * step);
         d.setTextSize(1);
-        d.setTextColor(SSD1306_WHITE);
-        d.setCursor(xMid - 3, cy - 3);
+        d.setTextColor(COLOR_TEXT);
+        d.setCursor(xMid - 4, cy - 4);
         d.print(count);
     }
 }
 
-void drawCaret(Adafruit_SSD1306& d, int point, bool hollow) {
+void drawCaret(Adafruit_GFX& d, int point, bool hollow) {
     PointGeom g = pointGeom(point);
     int xMid = g.x + SLOT_W / 2;
     // apex points into the middle gap toward the triangle it indicates.
     if (g.top) {
-        if (hollow) d.drawTriangle(xMid - 3, 37, xMid + 3, 37, xMid, 33, SSD1306_WHITE);
-        else d.fillTriangle(xMid - 3, 37, xMid + 3, 37, xMid, 33, SSD1306_WHITE);
+        if (hollow) d.drawTriangle(xMid - 8, 122, xMid + 8, 122, xMid, 110, COLOR_CURSOR);
+        else d.fillTriangle(xMid - 8, 122, xMid + 8, 122, xMid, 110, COLOR_CURSOR);
     } else {
-        if (hollow) d.drawTriangle(xMid - 3, 35, xMid + 3, 35, xMid, 39, SSD1306_WHITE);
-        else d.fillTriangle(xMid - 3, 35, xMid + 3, 35, xMid, 39, SSD1306_WHITE);
+        if (hollow) d.drawTriangle(xMid - 8, 139, xMid + 8, 139, xMid, 151, COLOR_CURSOR);
+        else d.fillTriangle(xMid - 8, 139, xMid + 8, 139, xMid, 151, COLOR_CURSOR);
     }
 }
 
-// The bar and off-tray aren't triangle slots, so they get their own marker
-// shapes: a small square in the middle gap for the bar, and a small square
-// near the right edge (row depends on whose home board is bearing off) for
-// bearing off.
-void drawBarCaret(Adafruit_SSD1306& d, bool hollow) {
+void drawBarCaret(Adafruit_GFX& d, bool hollow) {
     int xMid = BAR_X + BAR_W / 2;
-    if (hollow) d.drawRect(xMid - 3, 34, 6, 5, SSD1306_WHITE);
-    else d.fillRect(xMid - 3, 34, 6, 5, SSD1306_WHITE);
+    if (hollow) d.drawRect(xMid - 8, 122, 16, 12, COLOR_CURSOR);
+    else d.fillRect(xMid - 8, 122, 16, 12, COLOR_CURSOR);
 }
 
-void drawOffCaret(Adafruit_SSD1306& d, Player p, bool hollow) {
-    int y = (p == Player::P0) ? (BOARD_BOTTOM - 5) : BOARD_TOP;
-    if (hollow) d.drawRect(122, y, 5, 5, SSD1306_WHITE);
-    else d.fillRect(122, y, 5, 5, SSD1306_WHITE);
+void drawOffCaret(Adafruit_GFX& d, Player p, bool hollow) {
+    int y = (p == Player::P0) ? (BOARD_BOTTOM - 20) : (BOARD_TOP + 6);
+    if (hollow) d.drawRect(298, y, 14, 14, COLOR_CURSOR);
+    else d.fillRect(298, y, 14, 14, COLOR_CURSOR);
 }
 
 } // namespace
 
-void BoardRenderer::draw(Adafruit_SSD1306& display, const Board& board, Player toMove,
+void BoardRenderer::draw(Adafruit_GFX& display, const Board& board, Player toMove,
                           const std::vector<int>& diceRemaining, const UIState& ui) {
-    display.clearDisplay();
+    display.fillRect(0, 0, display.width(), STATUS_H, COLOR_STATUS_BG);
 
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setTextWrap(false); // never let an overlong status line spill onto the board
-    display.setCursor(0, 0);
+    display.setTextSize(2);
+    display.setTextColor(COLOR_TEXT);
+    display.setCursor(4, 3);
     display.print(toMove == Player::P0 ? "P0 " : "P1 ");
     switch (ui.mode) {
         case UIMode::WaitingToRoll: display.print("ROLL"); break;
@@ -114,13 +141,10 @@ void BoardRenderer::draw(Adafruit_SSD1306& display, const Board& board, Player t
         case UIMode::GameOver: display.print("WINS!"); break;
     }
     if (!diceRemaining.empty()) {
-        // Concatenated digits (e.g. "4444" for doubles) — every die value is
-        // a single digit, so no separators are needed and it stays compact
-        // enough to never wrap off the 128px status line.
         display.print(' ');
         for (int d : diceRemaining) display.print(d);
     }
-    if ((ui.mode == UIMode::SelectingSource || ui.mode == UIMode::SelectingDestination)) {
+    if (ui.mode == UIMode::SelectingSource || ui.mode == UIMode::SelectingDestination) {
         if (ui.cursorPoint == BAR) display.print(" BAR");
         else if (ui.cursorPoint == OFF) display.print(" OFF");
     }
@@ -133,13 +157,13 @@ void BoardRenderer::draw(Adafruit_SSD1306& display, const Board& board, Player t
         int baseY = g.top ? BOARD_TOP : BOARD_BOTTOM;
         int p0 = board.checkersOf(Player::P0, point);
         int p1 = board.checkersOf(Player::P1, point);
-        if (p0 > 0) drawCheckerStack(display, xMid, baseY, p0, g.top, true);
-        if (p1 > 0) drawCheckerStack(display, xMid, baseY, p1, g.top, false);
+        if (p0 > 0) drawCheckerStack(display, xMid, baseY, p0, g.top, Player::P0);
+        if (p1 > 0) drawCheckerStack(display, xMid, baseY, p1, g.top, Player::P1);
     }
 
     int barXMid = BAR_X + BAR_W / 2;
-    drawCheckerStack(display, barXMid, BOARD_TOP, board.bar[static_cast<int>(Player::P0)], true, true);
-    drawCheckerStack(display, barXMid, BOARD_BOTTOM, board.bar[static_cast<int>(Player::P1)], false, false);
+    drawCheckerStack(display, barXMid, BOARD_TOP, board.bar[static_cast<int>(Player::P0)], true, Player::P0);
+    drawCheckerStack(display, barXMid, BOARD_BOTTOM, board.bar[static_cast<int>(Player::P1)], false, Player::P1);
 
     if (ui.mode == UIMode::SelectingDestination) {
         if (ui.selectedSource >= 1 && ui.selectedSource <= 24) drawCaret(display, ui.selectedSource, true);
@@ -150,6 +174,4 @@ void BoardRenderer::draw(Adafruit_SSD1306& display, const Board& board, Player t
         else if (ui.cursorPoint == BAR) drawBarCaret(display, false);
         else if (ui.cursorPoint == OFF) drawOffCaret(display, toMove, false);
     }
-
-    display.display();
 }
