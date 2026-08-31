@@ -1,9 +1,10 @@
 #pragma once
 #include <Arduino.h>
 #include <RotaryEncoder.h>
+#include "DebouncedButton.h"
 
 // Wraps a rotary encoder + its push button: interrupt-driven rotation
-// counting, debounced button state, and short-click vs. long-press
+// counting, plus the button's debounced short-click vs. long-press
 // detection (long-press = "back/cancel").
 class InputController {
 public:
@@ -24,17 +25,8 @@ private:
     static void isrTrampoline();
 
     RotaryEncoder encoder_;
-    uint8_t clkPin_, dtPin_, swPin_;
+    uint8_t clkPin_, dtPin_;
     long lastPosition_ = 0;
 
-    bool rawState_ = HIGH;
-    bool debouncedState_ = HIGH;
-    unsigned long lastEdgeAt_ = 0;
-    unsigned long pressedAt_ = 0;
-    bool longPressFired_ = false;
-    bool pendingClick_ = false;
-    bool pendingLongPress_ = false;
-
-    static constexpr unsigned long kDebounceMs = 15;
-    static constexpr unsigned long kLongPressMs = 600;
+    DebouncedButton button_;
 };

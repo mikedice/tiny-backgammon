@@ -3,8 +3,11 @@
 InputController* InputController::instance_ = nullptr;
 
 InputController::InputController(uint8_t clkPin, uint8_t dtPin, uint8_t swPin)
-    : encoder_(clkPin, dtPin, RotaryEncoder::LatchMode::TWO03),
-      clkPin_(clkPin), dtPin_(dtPin), swPin_(swPin) {}
+    // FOUR3 matches standard 4-step-per-detent mechanical encoders (the
+    // common cheap kind) — one count per physical click. TWO03 was a poor
+    // early guess that made rotation feel jumpy/imprecise.
+    : encoder_(clkPin, dtPin, RotaryEncoder::LatchMode::FOUR3),
+      clkPin_(clkPin), dtPin_(dtPin), button_(swPin) {}
 
 void InputController::isrTrampoline() {
     if (instance_) instance_->encoder_.tick();
@@ -12,40 +15,17 @@ void InputController::isrTrampoline() {
 
 void InputController::begin() {
     instance_ = this;
-    pinMode(swPin_, INPUT_PULLUP);
+    button_.begin();
 
     // RotaryEncoder's constructor already set clkPin_/dtPin_ to INPUT_PULLUP.
     attachInterrupt(digitalPinToInterrupt(clkPin_), isrTrampoline, CHANGE);
     attachInterrupt(digitalPinToInterrupt(dtPin_), isrTrampoline, CHANGE);
 
     lastPosition_ = encoder_.getPosition();
-    rawState_ = digitalRead(swPin_);
-    debouncedState_ = rawState_;
 }
 
 void InputController::poll() {
-    bool raw = digitalRead(swPin_);
-    unsigned long now = millis();
-
-    if (raw != rawState_) {
-        rawState_ = raw;
-        lastEdgeAt_ = now;
-    }
-
-    if ((now - lastEdgeAt_) >= kDebounceMs && debouncedState_ != rawState_) {
-        debouncedState_ = rawState_;
-        if (debouncedState_ == LOW) {
-            pressedAt_ = now;
-            longPressFired_ = false;
-        } else if (!longPressFired_) {
-            pendingClick_ = true;
-        }
-    }
-
-    if (debouncedState_ == LOW && !longPressFired_ && (now - pressedAt_) >= kLongPressMs) {
-        longPressFired_ = true;
-        pendingLongPress_ = true;
-    }
+    button_.poll();
 }
 
 int InputController::consumeRotation() {
@@ -56,13 +36,9 @@ int InputController::consumeRotation() {
 }
 
 bool InputController::consumeClick() {
-    bool v = pendingClick_;
-    pendingClick_ = false;
-    return v;
+    return button_.consumeClick();
 }
 
 bool InputController::consumeLongPress() {
-    bool v = pendingLongPress_;
-    pendingLongPress_ = false;
-    return v;
+    return button_.consumeLongPress();
 }

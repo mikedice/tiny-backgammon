@@ -3,14 +3,17 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
 #include <esp_random.h>
+#include <Preferences.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include "pins.h"
 #include "Game.h"
 #include "BoardRenderer.h"
 #include "InputController.h"
 #include "ComputerPlayer.h"
+#include "DebouncedButton.h"
 
 Adafruit_ILI9341 display(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
 
@@ -24,6 +27,9 @@ GFXcanvas16 canvas(SCREEN_WIDTH, SCREEN_HEIGHT);
 // turning the knob clockwise increases the encoder position.
 InputController input(PIN_ENCODER_DT, PIN_ENCODER_CLK, PIN_ENCODER_SW);
 
+// Dedicated hardware button: brings up the "quit to menu?" prompt.
+DebouncedButton menuButton(PIN_MENU_BUTTON);
+
 int hwRollDie() {
     return static_cast<int>(esp_random() % 6) + 1;
 }
@@ -36,10 +42,63 @@ constexpr Player COMPUTER = Player::P1;
 constexpr unsigned long AI_ROLL_DELAY_MS = 700;
 constexpr unsigned long AI_MOVE_DELAY_MS = 900;
 
+// Win tally, persisted across power cycles in flash-backed NVS.
+Preferences prefs;
+uint32_t humanWins = 0;
+uint32_t computerWins = 0;
+
+// AI difficulty: chosen on the menu screen, defaults to full-strength play.
+enum class Difficulty { Easy = 0, Medium = 1, Normal = 2 };
+Difficulty difficulty = Difficulty::Normal;
+const char* difficultyName(Difficulty d) {
+    switch (d) {
+        case Difficulty::Easy: return "Easy";
+        case Difficulty::Medium: return "Medium";
+        default: return "Normal";
+    }
+}
+
+// Percent chance the AI ignores its own heuristic and plays a uniformly
+// random legal move instead — an easy way to make it blunder blots and
+// miss hits like a less careful player, without touching the (tested)
+// heuristic itself.
+int mistakePercent(Difficulty d) {
+    switch (d) {
+        case Difficulty::Easy: return 55;
+        case Difficulty::Medium: return 25;
+        default: return 0;
+    }
+}
+
+Move chooseComputerMove(const std::vector<Move>& legal) {
+    if (static_cast<int>(esp_random() % 100) < mistakePercent(difficulty)) {
+        return legal[esp_random() % legal.size()];
+    }
+    return ComputerPlayer::chooseMove(game.board(), COMPUTER, legal);
+}
+
+// Called exactly once, right at the moment a game's phase first becomes
+// GameOver (both call sites only reach this transition once per game).
+void recordGameResult() {
+    if (game.winnerPlayer() == HUMAN) {
+        humanWins++;
+        prefs.putUInt("humanWins", humanWins);
+    } else {
+        computerWins++;
+        prefs.putUInt("computerWins", computerWins);
+    }
+}
+
 constexpr unsigned long SCREENSAVER_TIMEOUT_MS = 60000;
 
 bool screensaverActive = false;
 unsigned long lastActivityAt = 0;
+
+// App-level state, one level up from the game itself: which screen the
+// device is showing right now.
+enum class AppScreen { Menu, Playing, ConfirmQuit };
+AppScreen appScreen = AppScreen::Menu;
+int confirmQuitIndex = 0; // 0 = No, 1 = Yes — defaults to the safer choice
 
 int wrapIndex(int idx, int size) {
     if (size <= 0) return 0;
@@ -83,13 +142,79 @@ void renderFrame() {
     display.drawRGBBitmap(0, 0, canvas.getBuffer(), SCREEN_WIDTH, SCREEN_HEIGHT);
 }
 
+constexpr uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
+    return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+}
+
+void drawMenuScreen() {
+    canvas.fillScreen(rgb565(24, 16, 10));
+    canvas.setTextColor(0xFFFF);
+    canvas.setTextSize(3);
+    canvas.setCursor(70, 40);
+    canvas.print("BACKGAMMON");
+    canvas.setTextColor(rgb565(255, 200, 40));
+    canvas.setTextSize(2);
+    canvas.setCursor(76, 95);
+    canvas.print("click to start");
+
+    String diffLine = "< " + String(difficultyName(difficulty)) + " >";
+    canvas.setTextColor(0xFFFF);
+    canvas.setCursor((SCREEN_WIDTH - static_cast<int>(diffLine.length()) * 12) / 2, 130);
+    canvas.print(diffLine);
+
+    String scoreLine = "You " + String(humanWins) + "   -   CPU " + String(computerWins);
+    canvas.setTextColor(rgb565(200, 200, 200));
+    canvas.setCursor((SCREEN_WIDTH - static_cast<int>(scoreLine.length()) * 12) / 2, 165);
+    canvas.print(scoreLine);
+
+    const char* credit = "A tiny game by Mike Dice";
+    canvas.setTextColor(rgb565(160, 150, 140));
+    canvas.setTextSize(2);
+    canvas.setCursor((SCREEN_WIDTH - static_cast<int>(strlen(credit)) * 12) / 2, 214);
+    canvas.print(credit);
+
+    display.drawRGBBitmap(0, 0, canvas.getBuffer(), SCREEN_WIDTH, SCREEN_HEIGHT);
+}
+
+void drawConfirmQuitScreen() {
+    canvas.fillScreen(rgb565(24, 16, 10));
+    canvas.setTextColor(0xFFFF);
+    canvas.setTextSize(2);
+    canvas.setCursor(16, 70);
+    canvas.print("Quit and return to menu?");
+
+    const char* labels[2] = {"No", "Yes"};
+    const int labelW[2] = {24, 36}; // chars * 12px (textSize 2)
+    constexpr int boxW = 80, boxH = 40, gap = 30;
+    constexpr int startX = (SCREEN_WIDTH - (boxW * 2 + gap)) / 2;
+    constexpr int boxY = 130;
+
+    for (int i = 0; i < 2; ++i) {
+        int x = startX + i * (boxW + gap);
+        uint16_t color = (i == confirmQuitIndex) ? rgb565(255, 200, 40) : rgb565(120, 120, 120);
+        canvas.drawRoundRect(x, boxY, boxW, boxH, 8, color);
+        if (i == confirmQuitIndex) canvas.drawRoundRect(x + 1, boxY + 1, boxW - 2, boxH - 2, 7, color);
+        canvas.setTextColor(0xFFFF);
+        canvas.setTextSize(2);
+        canvas.setCursor(x + (boxW - labelW[i]) / 2, boxY + (boxH - 16) / 2);
+        canvas.print(labels[i]);
+    }
+
+    display.drawRGBBitmap(0, 0, canvas.getBuffer(), SCREEN_WIDTH, SCREEN_HEIGHT);
+}
+
+void renderCurrentScreen() {
+    switch (appScreen) {
+        case AppScreen::Menu: drawMenuScreen(); break;
+        case AppScreen::Playing: renderFrame(); break;
+        case AppScreen::ConfirmQuit: drawConfirmQuitScreen(); break;
+    }
+}
+
 // Purely a display state — game state underneath is untouched, so waking
 // up just re-renders whatever was already there. A simple curled-up
 // sleeping cat built from basic shapes, with a slowly bobbing "Z Z z" and
 // a fixed high-contrast hint band pinned to the bottom so it stays legible.
-constexpr uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
-    return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
-}
 const uint16_t CAT_BODY = rgb565(235, 138, 55);    // orange tabby
 const uint16_t CAT_STRIPE = rgb565(196, 100, 35);  // faint darker orange
 const uint16_t CAT_OUTLINE = rgb565(110, 58, 20);
@@ -219,12 +344,17 @@ void playComputerTurn() {
         delay(AI_MOVE_DELAY_MS);
         auto legal = game.currentLegalMoves();
         if (legal.empty()) break; // Game guarantees this won't happen in this phase
-        Move chosen = ComputerPlayer::chooseMove(game.board(), COMPUTER, legal);
+        Move chosen = chooseComputerMove(legal);
         game.playMove(chosen);
         renderFrame();
     }
 
-    ui.mode = (game.phase() == GamePhase::GameOver) ? UIMode::GameOver : UIMode::WaitingToRoll;
+    if (game.phase() == GamePhase::GameOver) {
+        ui.mode = UIMode::GameOver;
+        recordGameResult();
+    } else {
+        ui.mode = UIMode::WaitingToRoll;
+    }
     renderFrame();
 }
 
@@ -241,37 +371,46 @@ void setup() {
     Serial.printf("Free heap after canvas alloc: %u bytes\n", ESP.getFreeHeap());
 
     input.begin();
+    menuButton.begin();
 
-    renderFrame();
+    prefs.begin("backgammon", false);
+    humanWins = prefs.getUInt("humanWins", 0);
+    computerWins = prefs.getUInt("computerWins", 0);
+
+    renderCurrentScreen();
     lastActivityAt = millis();
 }
 
 void loop() {
-    if (game.toMove() == COMPUTER && game.phase() != GamePhase::GameOver) {
+    if (appScreen == AppScreen::Playing && game.toMove() == COMPUTER &&
+        game.phase() != GamePhase::GameOver) {
         playComputerTurn();
         lastActivityAt = millis(); // don't fall asleep the instant control returns to the human
         return;
     }
 
     input.poll();
+    menuButton.poll();
     int rot = input.consumeRotation();
     bool click = input.consumeClick();
     bool longPress = input.consumeLongPress();
+    bool menuClick = menuButton.consumeClick();
 
     if (screensaverActive) {
-        // Only a click wakes it, per spec — rotation/long-press are ignored
-        // (and discarded) so nothing "jumps" once the game screen is back.
+        // Only a click wakes it, per spec — rotation/long-press/menu-button
+        // are ignored (and discarded) so nothing jumps once control returns
+        // to whatever screen was showing before it fell asleep.
         if (click) {
             screensaverActive = false;
             lastActivityAt = millis();
-            renderFrame();
+            renderCurrentScreen();
         } else {
             updateScreensaverAnimation();
         }
         return;
     }
 
-    if (rot != 0 || click || longPress) {
+    if (rot != 0 || click || longPress || menuClick) {
         lastActivityAt = millis();
     } else if (millis() - lastActivityAt >= SCREENSAVER_TIMEOUT_MS) {
         screensaverActive = true;
@@ -281,6 +420,45 @@ void loop() {
     }
 
     bool needsRedraw = false;
+
+    if (appScreen == AppScreen::Menu) {
+        if (rot != 0) {
+            difficulty = static_cast<Difficulty>(wrapIndex(static_cast<int>(difficulty) + rot, 3));
+            needsRedraw = true;
+        }
+        if (click) {
+            game.reset();
+            ui = UIState();
+            appScreen = AppScreen::Playing;
+            needsRedraw = true;
+        }
+        if (needsRedraw) renderCurrentScreen();
+        return;
+    }
+
+    if (appScreen == AppScreen::ConfirmQuit) {
+        if (rot != 0) {
+            confirmQuitIndex = wrapIndex(confirmQuitIndex + rot, 2);
+            needsRedraw = true;
+        }
+        if (menuClick) {
+            appScreen = AppScreen::Playing; // pressing it again = cancel
+            needsRedraw = true;
+        } else if (click) {
+            appScreen = (confirmQuitIndex == 1) ? AppScreen::Menu : AppScreen::Playing;
+            needsRedraw = true;
+        }
+        if (needsRedraw) renderCurrentScreen();
+        return;
+    }
+
+    // appScreen == AppScreen::Playing
+    if (menuClick) {
+        appScreen = AppScreen::ConfirmQuit;
+        confirmQuitIndex = 0; // default to "No"
+        renderCurrentScreen();
+        return;
+    }
 
     switch (game.phase()) {
         case GamePhase::WaitingToRoll: {
@@ -339,6 +517,7 @@ void loop() {
                             enterSelectingSource(game.currentLegalMoves());
                         } else if (game.phase() == GamePhase::GameOver) {
                             ui.mode = UIMode::GameOver;
+                            recordGameResult();
                         } else {
                             ui.mode = UIMode::WaitingToRoll;
                         }

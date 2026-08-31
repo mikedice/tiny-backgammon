@@ -212,6 +212,36 @@ void test_bear_off_overshoot_rules(void) {
     TEST_ASSERT_TRUE(exactFromSix);
 }
 
+// Mirrors test_bear_off_exact but for P1, whose bear-off direction/home
+// board (19-24) is the opposite of P0's — the exact scenario reported from
+// real play: P1 with its last 4 checkers stacked on point 24 (P1's own
+// "1-point"), rolling double 1s, should bear off all four.
+void test_bear_off_exact_p1(void) {
+    Board b;
+    b.points[23] = -4; // point 24, P1's last 4 checkers (negative = P1)
+    b.off[1] = 11;
+    TEST_ASSERT_TRUE(b.allCheckersHome(Player::P1));
+
+    std::vector<int> dice = {1, 1, 1, 1};
+    TEST_ASSERT_EQUAL(4, MoveGen::maxPlyLength(b, Player::P1, dice));
+
+    std::vector<int> remaining = dice;
+    for (int i = 0; i < 4; ++i) {
+        auto moves = MoveGen::legalMoves(b, Player::P1, remaining);
+        bool found = false;
+        for (auto& m : moves) {
+            if (m.from == 24 && m.to == OFF && m.die == 1) found = true;
+        }
+        TEST_ASSERT_TRUE(found);
+        b.applyMove(Player::P1, Move{24, OFF, 1});
+        remaining.erase(remaining.begin());
+    }
+
+    TEST_ASSERT_EQUAL(15, b.off[1]);
+    TEST_ASSERT_TRUE(b.isGameOver());
+    TEST_ASSERT_EQUAL(static_cast<int>(Player::P1), static_cast<int>(b.winner()));
+}
+
 void test_doubles_give_four_dice(void) {
     Roll r{4, 4};
     auto dice = r.toDice();
@@ -291,6 +321,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_two_on_bar_with_doubles);
     RUN_TEST(test_bear_off_exact);
     RUN_TEST(test_bear_off_overshoot_rules);
+    RUN_TEST(test_bear_off_exact_p1);
     RUN_TEST(test_doubles_give_four_dice);
     RUN_TEST(test_forced_larger_die_when_only_one_playable);
     RUN_TEST(test_game_turn_flow);
